@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Demosaic bench</title>
+<style>body { font: 13px/1.4 ui-monospace, monospace; background: #111; color: #ddd; padding: 16px; } pre { white-space: pre-wrap; }</style>
+<pre id="out"></pre>
+<script type="module">
+// Demosaicer check on the GPU (RCD). History: Hamilton–Adams replaced Malvar-He-Cutler (US 7,502,505, in force until
+// ~2027-01) at equal quality; RCD replaced Hamilton–Adams (2026-10-09): R/G/B/chroma 46.55/52.33/47.85/46.27 vs
+// 46.25/49.27/46.64/45.60 dB on sample 0011, 39.04/41.52/39.39/38.24 vs 38.27/39.60/38.35/37.21 dB on 0028. Ground truth: full-RGB image built from the clean ISO 200 sample (one RGB pixel
+// per 2x2 CFA cell), re-mosaiced with the camera's pattern; PSNR after a 1/2.2 gamma, plus chroma error (artifacts).
+import { parseDNG } from '../src/dng.js';
+import { createGPU } from '../src/gpu.js';
+import * as SH from '../src/shaders.js';
+
+const log = s => { document.getElementById('out').textContent += s + '\n'; };
+const gl = new OffscreenCanvas(16, 16).getContext('webgl2');
+gl.getExtension('EXT_color_buffer_float');
+const gpu = createGPU(gl), { tgt, pass, program, texture } = gpu;
+const file = new URLSearchParams(location.search).get('f') || 'DJI_20260704184220_0011_UP.DNG'; // ?f= another sample
+const d = parseDNG(await (await fetch('../ref/avata 360/' + file)).arrayBuffer());
+const W = d.width / 2, H = d.height / 2, sc = 1 / (d.white - d.black), truth = new Float32Array(W * H * 3);
+const pos = c => [0, 1, 2, 3].filter(k => d.cfa[k] === c);
+const [R] = pos(0), [B] = pos(2), Gs = pos(1);
+const at = (x, y, k) => Math.max(0, d.raw[(2 * y + (k >> 1)) * d.width + 2 * x + (k & 1)] - d.black) * sc;
+let mean = 0;
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = (y * W + x) * 3;
+  truth[i] = at(x, y, R); truth[i + 1] = (at(x, y, Gs[0]) + at(x, y, Gs[1])) / 2; truth[i + 2] = at(x, y, B);
+  mean += truth[i + 1];
+}
+const gain = 0.15 / (mean / (W * H));
+for (let i = 0; i < truth.length; i++) truth[i] = Math.min(1, truth[i] * gain);
+const cfa = new Float32Array(W * H);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) cfa[y * W + x] = truth[(y * W + x) * 3 + d.cfa[(y & 1) * 2 + (x & 1)]];
+const cfaTex = texture(gl.TEXTURE_2D, gl.NEAREST);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, W, H, 0, gl.RED, gl.FLOAT, cfa);
+
+const wb = d.neutral.map(v => d.neutral[1] / v), cfaU = u => { gl.uniform4iv(u.u_cfa, d.cfa); gl.uniform3fv(u.u_wb, wb); gl.uniform1f(u.u_clip, 1e9); }; // as in develop.js
+const noRaw = texture(gl.TEXTURE_2D, gl.NEAREST); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16UI, 1, 1, 0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, new Uint16Array(1)); // RCD_RB2's clip check: nothing clipped
+const out = tgt('out', gl.RGBA32F, W, H);
+const RD = program(SH.RCD_DIR), RL = program(SH.RCD_LPF), RG = program(SH.RCD_GREEN), R1 = program(SH.RCD_RB1), R2 = program(SH.RCD_RB2);
+const rcd = (cfaT, o, w, h, sfx = '') => {
+  const dir = tgt('dir' + sfx, gl.RGBA16F, w, h), lpf = tgt('lpf' + sfx, gl.R32F, w, h), g = tgt('g' + sfx, gl.R32F, w, h), rb = tgt('rb' + sfx, gl.RGBA32F, w, h);
+  pass(RD, dir.fb, w, h, [['u_cfaTex', cfaT]], cfaU);
+  pass(RL, lpf.fb, w, h, [['u_cfaTex', cfaT]], cfaU);
+  pass(RG, g.fb, w, h, [['u_cfaTex', cfaT], ['u_dir', dir.tex], ['u_lpf', lpf.tex]], cfaU);
+  pass(R1, rb.fb, w, h, [['u_cfaTex', cfaT], ['u_dir', dir.tex], ['u_green', g.tex]], cfaU);
+  pass(R2, o.fb, w, h, [['u_rb', rb.tex], ['u_dir', dir.tex], ['u_raw', noRaw]], cfaU);
+};
+const run = {
+  'RCD': () => rcd(cfaTex, out, W, H),
+};
+const big = {
+  'RCD': (bc, bt, n) => rcd(bc, bt, n, n, 'Big'),
+};
+const enc = v => Math.pow(Math.max(0, v), 1 / 2.2);
+log(`truth ${W}x${H} from ${file}, CFA ${d.cfa}`);
+for (const [name, fn] of Object.entries(run)) {
+  fn();
+  const px = new Float32Array(W * H * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb); gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, px);
+  const e = [0, 0, 0]; let chroma = 0, n = 0;
+  for (let y = 4; y < H - 4; y++) for (let x = 4; x < W - 4; x++) { // skip borders
+    const i = y * W + x, t = [0, 1, 2].map(c => enc(truth[i * 3 + c])), o = [0, 1, 2].map(c => enc(px[i * 4 + c]));
+    for (let c = 0; c < 3; c++) e[c] += (o[c] - t[c]) ** 2;
+    chroma += ((o[0] - o[1]) - (t[0] - t[1])) ** 2 + ((o[2] - o[1]) - (t[2] - t[1])) ** 2; n++;
+  }
+  const ps = v => (10 * Math.log10(n / v)).toFixed(2);
+  // speed on a full 3840² mosaic
+  const N = 3840, bt = tgt('bigOut', gl.RGBA16F, N, N), bc = texture(gl.TEXTURE_2D, gl.NEAREST);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, N, N);
+  const t0 = performance.now(); const reps = 5;
+  for (let r = 0; r < reps; r++) {
+    big[name](bc, bt, N);
+  }
+  gpu.finish(bt.tex); const ms = (performance.now() - t0) / reps; gl.deleteTexture(bc);
+  log(`${name.padEnd(18)} PSNR R ${ps(e[0])}  G ${ps(e[1])}  B ${ps(e[2])} dB   chroma-error PSNR ${ps(chroma / 2)} dB   ${ms.toFixed(1)} ms / 3840² lens`);
+}
+log('done');
+</script>

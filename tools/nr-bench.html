@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NR bench</title>
+<style>body { font: 13px/1.4 ui-monospace, monospace; background: #111; color: #ddd; padding: 16px; } pre { white-space: pre-wrap; }</style>
+<pre id="out">running…</pre>
+<script type="module">
+// Denoiser comparison on the real GPU code path (develop.js).
+// Quality: a clean Bayer reference (ISO 200 sample, 4x4 same-color averaging, noise / 4) plus synthetic
+// Poisson-Gaussian noise; PSNR in a gamma-encoded domain against the clean mosaic.
+// Speed: each configuration developed on a full 3840x3840 lens, median of 3, bounded by a 1-pixel readback.
+import { parseDNG } from '../src/dng.js';
+import { createGPU } from '../src/gpu.js';
+import { createDeveloper } from '../src/develop.js';
+
+const log = s => { document.getElementById('out').textContent += '\n' + s; };
+document.getElementById('out').textContent = '';
+const gl = new OffscreenCanvas(16, 16).getContext('webgl2');
+gl.getExtension('EXT_color_buffer_float');
+const gpu = createGPU(gl), dev = createDeveloper(gpu);
+const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+log(`GPU: ${dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)} | cores ${navigator.hardwareConcurrency} | ${navigator.userAgent.match(/(Chrome|Firefox|Safari)\/[\d.]+/)?.[0]}`);
+
+const load = async f => parseDNG(await (await fetch('../ref/avata 360/' + f)).arrayBuffer());
+const clean0 = await load('DJI_20260704184220_0011_UP.DNG');   // ISO 200
+const real = await load('DJI_20261004175341_0047_UP.DNG');     // ISO 1000, full size for timing
+
+// clean reference: each 2x2 CFA cell of the output averages the same CFA position over an 8x8 source block
+const F = 4, W = clean0.width / F, H = clean0.height / F, sc = 1 / (clean0.white - clean0.black);
+const clean = new Float32Array(W * H);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const bx = (x >> 1) * 2 * F, by = (y >> 1) * 2 * F, ox = x & 1, oy = y & 1; let s = 0;
+  for (let j = 0; j < F; j++) for (let i = 0; i < F; i++) s += clean0.raw[(by + 2 * j + oy) * clean0.width + bx + 2 * i + ox];
+  clean[y * W + x] = Math.max(0, s / (F * F) - clean0.black) * sc;
+}
+// brighten so the scene uses the range like a typical exposure (ISO 200 daylight sample is dark in raw terms)
+let mean = 0; for (const v of clean) mean += v; mean /= clean.length;
+const gain = 0.12 / mean; for (let i = 0; i < clean.length; i++) clean[i] = Math.min(1, clean[i] * gain);
+
+let seed = 7; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+function noisy(S, O) {
+  const raw = new Uint16Array(W * H), black = 256, white = 62400;
+  for (let i = 0; i < raw.length; i++) {
+    const x = clean[i] + gauss() * Math.sqrt(S * clean[i] + O);
+    raw[i] = Math.max(0, Math.min(65535, Math.round(black + x * (white - black))));
+  }
+  return { width: W, height: H, raw, channels: 1, cfa: clean0.cfa, black, white, noise: [S, O] };
+}
+const enc = v => Math.pow(Math.max(0, v), 1 / 2.2);
+function psnr(out) {
+  let e = 0; for (let i = 0; i < out.length; i++) { const d = enc(out[i]) - enc(clean[i]); e += d * d; }
+  return 10 * Math.log10(1 / (e / out.length));
+}
+function run(src, opts) {
+  const L = { src, ...dev.upload(src) };
+  dev.develop(L, opts);
+  const t = gpu.targets.cfa, n = src.width * src.height, px = new Float32Array(n * 4), out = new Float32Array(n);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb); gl.readPixels(0, 0, src.width, src.height, gl.RGBA, gl.FLOAT, px); // RGBA/FLOAT is the guaranteed combo
+  for (let i = 0; i < n; i++) out[i] = px[i * 4];
+  gl.deleteTexture(L.raw); gl.deleteTexture(L.tex);
+  return { out, sigma: L.noiseScale };
+}
+const sync = tex => gpu.finish(tex);
+function timeIt(opts) {
+  const L = { src: real, ...dev.upload(real) }, ts = [];
+  sync(L.tex);
+  for (let i = 0; i < 4; i++) { L.noiseScale = undefined; const t0 = performance.now(); dev.develop(L, opts); sync(L.tex); ts.push(performance.now() - t0); }
+  gl.deleteTexture(L.raw); gl.deleteTexture(L.tex);
+  return ts.slice(1).sort((a, b) => a - b)[1];
+}
+
+const CONFIGS = [
+  ['off', { nr: 0, nrc: 0 }],
+  ['color only (wavelet)', { nr: 0, nrc: 50 }],
+  ...[25, 50, 75, 100].map(s => [`wavelet ${s}`, { nr: s, nrc: 50, method: 'wavelet' }]),
+  ...[0.4, 0.7, 1.0, 1.3, 1.7].map(h => [`nlm R3 h${h}`, { nr: 1, nrc: 50, method: 'nlm', nlmR: 3, nlmH: h }]),
+  ...[1.0, 1.3].map(h => [`nlm R5 h${h}`, { nr: 1, nrc: 50, method: 'nlm', nlmR: 5, nlmH: h }]),
+  ...[1.0].map(h => [`nlm R2 h${h}`, { nr: 1, nrc: 50, method: 'nlm', nlmR: 2, nlmH: h }]),
+];
+const res = {};
+for (const [S, O, label] of [[1e-4, 1e-7, 'moderate (≈ISO 1600)'], [4e-4, 4e-7, 'heavy (≈ISO 6400)']]) {
+  const src = noisy(S, O);
+  log(`\n— noise ${label}: S=${S} O=${O}`);
+  for (const [name, opts] of CONFIGS) {
+    const { out, sigma } = run(src, opts);
+    (res[name] ??= {})[label] = psnr(out);
+    log(`${name.padEnd(22)} PSNR ${psnr(out).toFixed(2)} dB${sigma ? `   noise est ×${sigma.toFixed(2)}` : ''}`);
+    await new Promise(r => setTimeout(r));
+  }
+}
+log('\n— full-size lens (3840²) develop time, median');
+for (const [name, opts] of CONFIGS) { (res[name] ??= {}).ms = timeIt(opts); log(`${name.padEnd(22)} ${res[name].ms.toFixed(1)} ms`); await new Promise(r => setTimeout(r)); }
+window.__res = res; log('\ndone');
+</script>
