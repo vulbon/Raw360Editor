@@ -28,17 +28,6 @@
   <button class="pill icon" id="panel-btn" aria-controls="tools" aria-expanded="true" data-i18n-title="tools"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3.5" width="15" height="13" rx="3"/><path d="M12.5 3.5v13"/></svg></button>
 </header>
 
-<div id="empty" class="glass rim">
-  <div class="zone">
-    <img class="globe" src="favicon.svg" alt="">
-    <div class="big" data-i18n="drop"></div>
-    <p data-i18n="dropJpg"></p>
-    <div class="row picks"><button class="primary pill" id="start-files" data-i18n="pickFiles"></button><button class="pill" id="start-folder" data-i18n="pickFolder"></button></div>
-    <small data-i18n="privacy"></small>
-    <small id="ioshint" data-i18n="iosHint" hidden></small>
-    <small style="opacity:.6">This product includes DNG technology under license by Adobe. Not affiliated with DJI, Insta360 or Adobe.</small>
-  </div>
-</div>
 
 <button class="glass" id="panel-handle" aria-controls="tools" data-i18n-title="tools"><span aria-hidden="true">›</span></button>
 <aside class="glass" id="tools">
@@ -98,12 +87,16 @@
 
 <dialog id="open-dlg" class="glass rim" aria-labelledby="open-title">
   <form method="dialog">
-    <b id="open-title" data-i18n="open"></b>
-    <div class="drop" data-i18n="openDrop"></div>
+    <img class="globe" src="favicon.svg" alt="">
+    <b id="open-title" data-i18n="drop"></b>
+    <p data-i18n="dropJpg"></p>
     <ul id="shots" hidden></ul>
     <small id="open-msg"></small>
-    <div class="row"><button type="button" id="pick-files" data-i18n="pickFiles"></button><button type="button" id="pick-folder" data-i18n="pickFolder"></button></div>
-    <div class="row"><button value="cancel" data-i18n="cancel"></button></div>
+    <div class="row"><button type="button" class="primary" id="pick-files" data-i18n="pickFiles"></button><button type="button" id="pick-folder" data-i18n="pickFolder"></button></div>
+    <div class="row" id="open-cancel"><button value="cancel" data-i18n="cancel"></button></div>
+    <small data-i18n="privacy"></small>
+    <small id="ioshint" data-i18n="iosHint" hidden></small>
+    <small class="fine">This product includes DNG technology under license by Adobe. Not affiliated with DJI, Insta360 or Adobe.</small>
   </form>
 </dialog>
 

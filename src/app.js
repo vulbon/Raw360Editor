@@ -225,7 +225,7 @@ async function prepare(items, t0) {
   asShot();
   timing = { decode: tDecode - t0, develop: tDevelop - tDecode, align: tAlign - tDevelop, level: performance.now() - tAlign };
   status('shot');
-  $('empty').hidden = true;
+  if ($('open-dlg').open) $('open-dlg').close(); // loaded from a link (?load=) while the start dialog was up
   $('export-btn').disabled = false;
   syncInputs(); render();
 }
@@ -487,7 +487,7 @@ let initialTheme = 'dark';
 try { initialTheme = localStorage.getItem('theme') || 'dark'; } catch {}
 applyTheme(initialTheme);
 if (/iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform))) $('ioshint').hidden = false;
-if (!glOK) { status('noGL'); for (const id of ['open', 'start-files', 'start-folder']) $(id).disabled = true; }
+if (!glOK) { status('noGL'); for (const id of ['open', 'pick-files', 'pick-folder']) $(id).disabled = true; }
 else status('hint');
 
 document.addEventListener('input', e => {
@@ -567,6 +567,7 @@ function openFiles(files) {
   const shots = groupShots(files), dlg = $('open-dlg'), list = $('shots');
   $('open-msg').textContent = shots.length > 1 ? t('shotsFound', { n: shots.length }) : shots.length ? '' : t('noShots');
   list.hidden = shots.length < 2;
+  $('open-cancel').hidden = !session.lenses.length; // nothing to go back to
   if (shots.length === 1) { if (dlg.open) dlg.close(); return load(shots[0].files); }
   list.replaceChildren(...shots.map(s => {
     const li = document.createElement('li'), b = document.createElement('button'), kind = document.createElement('span');
@@ -591,11 +592,19 @@ async function droppedFiles(dt) {
   for (const e of entries) await walk(e);
   return out;
 }
-$('open').onclick = () => { $('open-msg').textContent = ''; $('shots').hidden = true; $('open-dlg').showModal(); };
-// the start card picks directly; the Open dialog (header button) offers the same plus a list when several shots arrive
-$('pick-files').onclick = $('start-files').onclick = () => $('files').click();
-$('pick-folder').onclick = $('start-folder').onclick = () => $('folder').click();
-$('pick-folder').hidden = $('start-folder').hidden = !('webkitdirectory' in $('folder')); // iOS has no folder picker
+// One Open dialog. With nothing loaded it is the start screen (non-modal: language, theme and panel stay usable, and
+// there is nothing to cancel back to); the header button opens it modal over the current picture.
+function showOpen(modal) {
+  const dlg = $('open-dlg');
+  $('open-msg').textContent = ''; $('shots').hidden = true; $('open-cancel').hidden = !session.lenses.length;
+  if (dlg.open) dlg.close();
+  modal ? dlg.showModal() : dlg.show();
+}
+$('open').onclick = () => showOpen(true);
+showOpen(false);
+$('pick-files').onclick = () => $('files').click();
+$('pick-folder').onclick = () => $('folder').click();
+$('pick-folder').hidden = !('webkitdirectory' in $('folder')); // iOS has no folder picker
 for (const id of ['files', 'folder']) $(id).onchange = e => { openFiles([...e.target.files]); e.target.value = ''; };
 const hasFiles = e => e.dataTransfer?.types.includes('Files'); // not a dragged slider, text or image from the page
 document.addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); document.body.classList.add('drag'); });

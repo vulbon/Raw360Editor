@@ -33,8 +33,6 @@ body {
 button.attn { animation: attn 1.6s ease-in-out infinite; }
 @keyframes attn { 50% { box-shadow: 0 0 0 3px var(--accent); } }
 @media (prefers-reduced-motion: reduce) { button.attn { animation: none; box-shadow: 0 0 0 2px var(--accent); } }
-#empty .picks { justify-content: center; }
-#empty .picks button { flex: none; padding: 8px 22px; }
 #fade { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; } /* old picture during a projection change */
 
 .glass {
@@ -189,11 +187,18 @@ dialog:focus, dialog:focus-visible { outline: none; }
 @media (prefers-reduced-motion: reduce) { .rim::before { animation: none; } }
 
 /* open dialog: drop zone, and a list when several shots were dropped */
-#open-dlg { width: min(420px, calc(100% - 32px)); padding: 20px 22px; border-radius: 22px; color: var(--fg); }
+/* the one Open dialog: start screen (non-modal, the toolbar stays usable) and the header's Open button (modal) */
+#open-dlg { position: fixed; inset: 0; margin: auto; height: fit-content; width: min(440px, calc(100% - 32px)); padding: 24px;
+  border-radius: 24px; color: var(--fg); text-align: center; transition: background .2s; }
 #open-dlg::backdrop { background: rgb(0 0 0 / .2); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
 #open-dlg form { display: flex; flex-direction: column; gap: 10px; }
-#open-dlg .drop { padding: 28px 12px; border-radius: 14px; text-align: center; color: var(--mute); background: var(--fill); transition: background .2s, color .2s; }
-body.drag #open-dlg .drop { background: rgb(10 132 255 / .15); color: var(--fg); }
+/* as the start screen it sits in the picture area, left of the panel, under the toolbar's popups */
+#open-dlg:not(:modal) { inset: 50% auto auto calc((100% - var(--panel-w) - var(--gap)) / 2); transform: translate(-50%, -50%); margin: 0; z-index: 1; }
+#open-dlg #open-title { font-size: 17px; }
+#open-dlg p { color: var(--mute); margin: 0; }
+#open-dlg .globe { width: 48px; height: 48px; margin: 0 auto; display: block; }
+#open-dlg .fine { opacity: .6; }
+body.drag #open-dlg { background: rgb(10 132 255 / .15); } /* files dragged over the page */
 #open-dlg small { color: var(--mute); }
 #shots { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 #shots button { width: 100%; justify-content: space-between; text-align: left; }
@@ -228,17 +233,9 @@ body.drag #open-dlg .drop { background: rgb(10 132 255 / .15); color: var(--fg);
 @keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(280%); } }
 @media (prefers-reduced-motion: reduce) { .bar i, .bar i::after { animation: none; } .bar.indet i { width: 100%; } }
 
-/* status + empty state */
+/* status line */
 #status { position: fixed; left: calc(var(--gap) + env(safe-area-inset-left)); bottom: calc(var(--gap) + env(safe-area-inset-bottom)); max-width: calc(100% - var(--panel-w) - 3 * var(--gap));
   padding: 8px 14px; border-radius: 999px; color: var(--mute); z-index: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#empty { position: fixed; top: 50%; left: calc((100% - var(--panel-w) - var(--gap)) / 2); transform: translate(-50%, -50%);
-  width: min(440px, calc(100% - 2 * var(--gap))); padding: 28px; border-radius: 26px; text-align: center; z-index: 1; }
-#empty[hidden] { display: none; }
-#empty .zone { border-radius: 18px; padding: 8px 6px; transition: background .2s; } /* the card's rim is the frame; dragging files over tints it */
-#empty .big { font-size: 17px; font-weight: 600; margin: 10px 0 6px; }
-#empty p { color: var(--mute); margin: 4px 0; }
-#empty .globe { width: 48px; height: 48px; margin: 0 auto; display: block; }
-body.drag #empty .zone { background: rgb(10 132 255 / .1); }
 
 @media (max-width: 760px) {
   :root { --gap: 8px; }
@@ -246,7 +243,7 @@ body.drag #empty .zone { background: rgb(10 132 255 / .1); }
   .brand b { display: none; }
   aside { top: auto; left: var(--gap); width: auto; max-height: 44dvh; border-radius: 22px; }
   #status { bottom: calc(44dvh + 2 * var(--gap)); max-width: calc(100% - 2 * var(--gap)); }
-  #empty { left: 50%; top: 32%; }
+  #open-dlg:not(:modal) { left: 50%; top: 32%; }
   #panel-handle { display: none; } /* phones: the top-bar button toggles the bottom sheet */
   body.panel-off aside { transform: translateY(calc(100% + 2 * var(--gap))); }
   body.panel-off #status { bottom: calc(var(--gap) + env(safe-area-inset-bottom)); }
