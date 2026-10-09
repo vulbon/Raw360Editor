@@ -68,7 +68,6 @@ function applyLang(l) {
   for (const r of document.querySelectorAll('[name=lang]')) r.checked = r.value === lang;
   if (lastStatus) status(...lastStatus);
   if ($('theme-btn').title) applyTheme(themePref); // re-label in the new language
-  movePill(); // chip widths changed with the labels
 }
 
 // ---------- on-screen crop frame: what you see inside the frame is exactly what gets exported ----------
@@ -422,6 +421,8 @@ function movePill() {
 function buildUI() {
   $('projs').innerHTML = '<span class="pill" aria-hidden="true"></span>'
     + Object.keys(PROJ).map(k => `<label class="chip"><input type="radio" name="proj" value="${k}"><span data-i18n="${k}"></span></label>`).join('');
+  const ro = new ResizeObserver(() => movePill()); // labels arrive later (language, fonts) and change chip widths
+  for (const c of $('projs').querySelectorAll('.chip')) ro.observe(c);
   $('aspects').innerHTML = Object.keys(ASPECTS).map(k => `<label class="chip"><input type="radio" name="aspect" value="${k}"><span ${k === 'free' ? 'data-i18n="free"' : ''}>${k}</span></label>`).join('')
     + '<input id="ratio" type="text" inputmode="decimal" placeholder="W:H" data-i18n-title="ratio" autocomplete="off">';
   for (const box of document.querySelectorAll('[data-sliders]'))
@@ -486,7 +487,7 @@ let initialTheme = 'dark';
 try { initialTheme = localStorage.getItem('theme') || 'dark'; } catch {}
 applyTheme(initialTheme);
 if (/iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform))) $('ioshint').hidden = false;
-if (!glOK) { status('noGL'); $('open').disabled = $('open2').disabled = true; }
+if (!glOK) { status('noGL'); for (const id of ['open', 'start-files', 'start-folder']) $(id).disabled = true; }
 else status('hint');
 
 document.addEventListener('input', e => {
@@ -590,10 +591,11 @@ async function droppedFiles(dt) {
   for (const e of entries) await walk(e);
   return out;
 }
-$('open').onclick = $('open2').onclick = () => { $('open-msg').textContent = ''; $('shots').hidden = true; $('open-dlg').showModal(); };
-$('pick-files').onclick = () => $('files').click();
-$('pick-folder').onclick = () => $('folder').click();
-$('pick-folder').hidden = !('webkitdirectory' in $('folder')); // iOS has no folder picker
+$('open').onclick = () => { $('open-msg').textContent = ''; $('shots').hidden = true; $('open-dlg').showModal(); };
+// the start card picks directly; the Open dialog (header button) offers the same plus a list when several shots arrive
+$('pick-files').onclick = $('start-files').onclick = () => $('files').click();
+$('pick-folder').onclick = $('start-folder').onclick = () => $('folder').click();
+$('pick-folder').hidden = $('start-folder').hidden = !('webkitdirectory' in $('folder')); // iOS has no folder picker
 for (const id of ['files', 'folder']) $(id).onchange = e => { openFiles([...e.target.files]); e.target.value = ''; };
 const hasFiles = e => e.dataTransfer?.types.includes('Files'); // not a dragged slider, text or image from the page
 document.addEventListener('dragover', e => { if (!hasFiles(e)) return; e.preventDefault(); document.body.classList.add('drag'); });
