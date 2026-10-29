@@ -22,7 +22,9 @@ export function initGL(canvas) {
 }
 
 export const nrOpts = () => ({ nr: S.nr, nrc: S.nrc, method: S.nr ? dev.pickMethod() : 'wavelet' }); // device-tiered luma NR
-export const developAll = () => { session.lenses.forEach(L => dev.develop(L, { ...nrOpts(), ca: L.src.cfa && caModel(L) })); dev.freeScratch(); };
+// deblur: the profile's lens blur scaled by the slider (0 = off)
+const deblurOpts = () => { const p = S.deblur && session.profile.deblur, k = S.deblur / 100; return p && { s0: Math.max(0.3, p.s0 * k), s1: Math.max(0.3, p.s1 * k) }; };
+export const developAll = () => { session.lenses.forEach(L => dev.develop(L, { ...nrOpts(), ca: L.src.cfa && caModel(L), deblur: deblurOpts() })); dev.freeScratch(); };
 
 // Lateral CA model of a lens: the camera's DNG WarpRectilinear plus, while CA correction is on, the profile's residual (r², r⁴).
 const NO_WARP = { coef: [[1, 0, 0, 0], 0, [1, 0, 0, 0]], cx: 0.5, cy: 0.5 };
@@ -129,6 +131,7 @@ export function draw({ w, h, vy = 0, res, off = 0, offX = 0, shift = 0, flow = S
   gl.uniform1f(u.u_seam, S.seam * RAD);
   gl.uniform1f(u.u_expo, 2 ** (session.lenses[0].src.baselineExposure + S.ev));
   gl.uniform1f(u.u_contrast, S.contrast / 100);
+  gl.uniform1f(u.u_clarity, S.clarity / 100); gl.uniform1f(u.u_dehaze, S.dehaze / 100); gl.uniform1f(u.u_texture, S.texture / 100);
   gl.uniform1f(u.u_sat, S.sat / 100);
   gl.uniform1f(u.u_vib, S.vib / 100);
   gl.uniform1fv(u.u_hslH, SLIDERS.hslH.map(([k]) => S[k] * 0.3)); // ±100 = ±30°, toward the neighbouring band
@@ -149,8 +152,8 @@ export function draw({ w, h, vy = 0, res, off = 0, offX = 0, shift = 0, flow = S
 // Blurred log-luminance of the current view at low resolution (shadows/highlights): Gaussian, sigma 1/64 of the
 // width. It only depends on framing and color, not on output size, so the preview and every export strip use the same one.
 export function renderBase(aspect, view, shift) {
-  if (!S.hl && !S.sh) return;
-  const bw = 512, bh = Math.max(8, Math.round(bw / aspect)), t = tgt('base', gl.R16F, bw, bh), tmp = tgt('baseB', gl.R16F, bw, bh);
+  if (!S.hl && !S.sh && !S.clarity && !S.dehaze) return;
+  const bw = 512, bh = Math.max(8, Math.round(bw / aspect)), t = tgt('base', gl.RG16F, bw, bh), tmp = tgt('baseB', gl.RG16F, bw, bh);
   gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
   draw({ w: bw, h: bh, res: [bw, bh], mode: 4, shift, view });
   const blur = (src, dst, dir) => pass(blurProg, dst.fb, bw, bh, [['u_src', src.tex]], u => { gl.uniform2i(u.u_dir, ...dir); gl.uniform1f(u.u_sigma, bw / 64); });

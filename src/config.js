@@ -10,6 +10,8 @@ const RAD = Math.PI / 180;
 // 11 X4), so nothing is estimated from the user's image.
 export const PROFILES = [
   { match: /FCA188|Avata ?360/i, name: 'DJI Avata 360', mount: [-1.10, 0.52, 17.29],
+    // deblur: lens blur sigma in pixels at the centre and at the image circle (Richardson-Lucy, see DEBLUR); by eye
+    deblur: { s0: 0.5, s1: 1.4 },
     // lens 2 seam correction, mean of per-shot auto-align on textured shots; starting point + prior for new shots
     l2: { ryaw: 0.156, rpitch: 0.235, rroll: 0.241, f2: 0.9897, cx2: -5.14, cy2: 3.81 }, lenses: {
     UP: { f: 1143.811, cx: 1931.778, cy: 1922.828, k1: -0.0016576, k2: -0.00089411, rmax: 1870, ca: { R: [0, 0.00023], B: [-0.00009, -0.00047] },
@@ -19,7 +21,7 @@ export const PROFILES = [
   } },
 ];
 // Unknown camera: ideal back-to-back equidistant lenses, ~190° each. Tune with the lens sliders.
-export const generic = w => ({ name: 'Dual fisheye', mount: [0, 0, 0], lenses: {
+export const generic = w => ({ name: 'Dual fisheye', mount: [0, 0, 0], deblur: { s0: 0.5, s1: 1.2 }, lenses: {
   0: { f: w / 2 / 1.66, cx: w / 2, cy: w / 2, k1: 0, k2: 0, rmax: w * 0.487, R: [[1, 0, 0], [0, 0, 1], [0, -1, 0]] },
   1: { f: w / 2 / 1.66, cx: w / 2, cy: w / 2, k1: 0, k2: 0, rmax: w * 0.487, R: [[-1, 0, 0], [0, 0, 1], [0, 1, 0]] },
 } });
@@ -48,7 +50,7 @@ export function instaProfile(src) {
   };
   // imu: accelerometer axes -> lens 1 axes (x right, y down, z forward). Found by leveling shots held pitched 46 deg (129),
   // rolled 62 deg (133) and dipped at a pool window (117) from the trailer's gravity alone: all three come out level.
-  return { name: src.model || 'Insta360', mount: [0, 0, 0], imu: [[0, 0, 1], [-1, 0, 0], [0, 1, 0]],
+  return { name: src.model || 'Insta360', mount: [0, 0, 0], deblur: { s0: 0.5, s1: 1.2 }, imu: [[0, 0, 1], [-1, 0, 0], [0, 1, 0]],
     lenses: Object.fromEntries(src.insta.map((c, i) => [i, lens(c, i)])) };
 }
 
@@ -70,16 +72,16 @@ export const SLIDERS = {
   level: [['lroll', -45, 45, 0.05], ['lpitch', -45, 45, 0.05], ['lyaw', -180, 180, 0.1]],
   wb: [['temp', 2000, 15000, 10], ['tint', -150, 150, 1]],
   tone: [['ev', -5, 5, 0.01], ['contrast', -100, 100, 1], ['hl', -100, 100, 1], ['sh', -100, 100, 1], ['wh', -100, 100, 1], ['bk', -100, 100, 1]],
-  presence: [['vib', -100, 100, 1], ['sat', -100, 100, 1]],
+  presence: [['texture', -100, 100, 1], ['clarity', -100, 100, 1], ['dehaze', 0, 100, 1], ['vib', -100, 100, 1], ['sat', -100, 100, 1]],
   hslH: hslSliders('hue'), hslS: hslSliders('sat'), hslL: hslSliders('lum'),
-  noise: [['sharp', 0, 100, 1], ['nr', 0, 100, 1], ['nrc', 0, 100, 1]],
+  noise: [['deblur', 0, 100, 1], ['sharp', 0, 100, 1], ['nr', 0, 100, 1], ['nrc', 0, 100, 1]],
   lens: [['seam', 0.1, 5, 0.1], ['vig', 0, 0.15, 0.001], ['defringe', 0, 100, 1]],
 };
 
 export const DEFAULTS = {
   proj: 'equirect', aspect: '2:1', fov: 360, yaw: 0, pitch: 0, stretch: 1, pd: 1,
   lyaw: 0, lpitch: 0, lroll: 0, grid: false, guide: 'none',
-  temp: 5500, tint: 0, ev: 0, contrast: 0, hl: 0, sh: 0, wh: 0, bk: 0, sat: 0, vib: 0, sharp: 25, nr: 0, nrc: 30,
+  temp: 5500, tint: 0, ev: 0, contrast: 0, hl: 0, sh: 0, wh: 0, bk: 0, sat: 0, vib: 0, texture: 0, clarity: 0, dehaze: 0, sharp: 25, deblur: 50, nr: 0, nrc: 30,
   seam: 4, flow: true, vig: 0, defringe: 0, ca: true, safe: false, autoAlign: true, fscale: 1, ryaw: 0, rpitch: 0, rroll: 0, f2: 1, cx2: 0, cy2: 0,
   ...Object.fromEntries(['hue', 'sat', 'lum'].flatMap(p => hslSliders(p).map(([k]) => [k, 0]))),
 };
@@ -96,4 +98,3 @@ export const BAND_DEG = 7;
 export const FLOW_W = 4096, FLOW_BINS = 128, FLOW_R = 10, FLOW_FADE = 10 * RAD;
 // Seam gain (local exposure/color match): GAIN_BINS sectors, faded over GAIN_FADE.
 export const GAIN_BINS = 64, GAIN_FADE = 25 * RAD;
-// Auto chromatic aberration: sample grid and summing block size.

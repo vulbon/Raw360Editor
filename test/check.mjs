@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parseDNG, decodeLJ92 } from '../src/dng.js';
-import { encodeLJ92, linearDNG, tiles } from '../src/export.js';
+import { encodeLJ92, linearDNG, tiles, jpegHeader, encodeJpegStrip } from '../src/export.js';
 import { xyFromTempTint, tempTintFromXY, mm, tr, rx, ry, rz, eulerYXZ, fromTo } from '../src/color.js';
 
 const time = (label, fn, runs = 3) => {
@@ -43,6 +43,19 @@ const time = (label, fn, runs = 3) => {
 }
 
 // real sample: decode timing + lossless re-encode through the DNG writer
+// baseline JPEG: byte stuffing leaves no bare 0xFF, a flat gray block costs only a few bytes, the header carries the
+// restart interval. Pixel-level decoding is checked in the browser (no JPEG decoder in Node).
+{
+  const W = 24, H = 16, gray = new Uint8Array(W * H * 4).fill(128), noisy = gray.map((_, i) => (i * 97 + 13) & 255);
+  const flat = encodeJpegStrip(gray, W, H, 90), busy = encodeJpegStrip(noisy, W, H, 90);
+  assert.ok(flat.length < 16, `flat gray should be tiny, got ${flat.length} bytes`);
+  for (let i = 0; i < busy.length - 1; i++) assert.ok(busy[i] !== 0xFF || busy[i + 1] === 0, 'unstuffed 0xFF in entropy data');
+  const hdr = Buffer.concat(jpegHeader(W, H, 90, 6, null).map(Buffer.from));
+  assert.equal(hdr[0], 0xFF); assert.equal(hdr[1], 0xD8);
+  assert.ok(hdr.includes(Buffer.from([0xFF, 0xDD, 0, 4, 0, 6])), 'DRI with the restart interval');
+  console.log(`baseline JPEG 4:4:4 strip: flat ${flat.length} B, noisy ${busy.length} B   ok`);
+}
+
 const sample = process.argv[2] || 'ref/avata 360/DJI_20261004175341_0047_UP.DNG';
 if (fs.existsSync(sample)) {
   const b = fs.readFileSync(sample), buf = b.buffer.slice(b.byteOffset, b.byteOffset + b.length);

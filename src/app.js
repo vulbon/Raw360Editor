@@ -1,5 +1,5 @@
 import { initGL, gl, gpu, dev, target, tgt, nrOpts, developAll, updateColor, setupProfileTextures, draw, renderBase, levelMatrix, lookMatrix, viewMatrix, vShift } from './render.js';
-import { TILE, tiff16, linearDNG, jpegWithXMP, panoXMP, sourceXMP, encodeTileRow } from './export.js';
+import { TILE, tiff16, linearDNG, jpegHeader, panoXMP, sourceXMP, encodeTileRow, encodeJpegStrip } from './export.js';
 import { STR } from './i18n.js';
 import { drawBand, nccBatch, matchGains, autoAlign, measureSeamGain, flowOffsets, measureFlow, metadataLevel, setLevel, levelFromJPG, levelToHorizon } from './calibrate.js';
 import { PROFILES, generic, instaProfile, PROJ, ASPECTS, SLIDERS, DEFAULTS, ALIGN_KEYS, HSL_BANDS, HSL_HUES } from './config.js';
@@ -111,6 +111,7 @@ function drawView() {
 function crossfade() {
   if (session.lenses.length !== 2 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   drawView(); // the old projection, drawn in this task so the canvas can still be copied
+  if (!canvas.width || !canvas.height) return; // nothing on screen yet (hidden page)
   const ov = $('fade');
   ov.getAnimations().forEach(a => a.cancel());
   ov.width = canvas.width; ov.height = canvas.height;
@@ -197,10 +198,10 @@ async function load(files) {
   try {
     const decoded = await Promise.all(dngs.map(f => f.arrayBuffer().then(decode)));
     if (dngs.length === 1) { // one DNG with both fisheyes side by side (Insta360)
-      if (decoded[0].width !== 2 * decoded[0].height) { idle(); return status('needTwo'); }
+      if (decoded[0].width !== 2 * decoded[0].height) { idle(); if (!session.lenses.length) showOpen(false); return status('needTwo'); }
       items = splitDual(decoded[0]).map(src => ({ name: dngs[0].name, src, role: null }));
     } else items = dngs.map((f, i) => ({ name: f.name, src: decoded[i], role: /_UP\.dng$/i.test(f.name) ? 'UP' : /_DOWN\.dng$/i.test(f.name) ? 'DOWN' : null }));
-  } catch (e) { idle(); return status('readFail', { e: e.message }); }
+  } catch (e) { idle(); if (!session.lenses.length) showOpen(false); return status('readFail', { e: e.message }); }
   if (seq !== loadSeq) return; // a newer drop superseded this one
   try { await prepare(items, t0); } catch (e) { status('readFail', { e: e.message }); }
   idle();
@@ -211,7 +212,7 @@ async function prepare(items, t0) {
   items.sort((a, b) => Number(a.role === 'DOWN') - Number(b.role === 'DOWN')); // UP (or unknown) first
   const src = items[0].src;
   session.profile = PROFILES.find(p => p.match.test(`${src.model} ${src.product}`)) || (src.insta ? instaProfile(src) : generic(src.width));
-  session.lenses.forEach(L => { gl.deleteTexture(L.tex); gl.deleteTexture(L.raw); });
+  session.lenses.forEach(L => gl.deleteTexture(L.tex));
   session.lenses = items.map((it, i) => ({ src: it.src, geo: session.profile.lenses[it.role] || session.profile.lenses[i], ...dev.upload(it.src), gain: [1, 1, 1] }));
   const tDecode = performance.now();
   developAll(); gpu.finish(session.lenses[1].tex);
@@ -274,10 +275,12 @@ function toneStats() {
 // Closed loop on the rendered image: exposure sets the median, highlights / shadows only guard against clipping and
 // crushing, vibrance moves the color halfway to the reference (scenes differ); contrast comes from the tone curve.
 // Damped steps, because each slider moves the others' targets a little; moderate ranges keep the result natural.
-function autoTone() {
+// vivid: the punchy look (clarity, a little dehaze, more color, crisper), set first so exposure is fitted on top of it
+function autoTone(vivid = false) {
   const lim = (v, lo, hi) => Math.min(hi, Math.max(lo, v)), T = LUCKY;
-  Object.assign(S, { ev: 0, contrast: 0, hl: 0, sh: 0, wh: 0, bk: 0, vib: 0, sat: 0 });
-  const satT = (toneStats().sat + T.sat) / 2;
+  Object.assign(S, { ev: 0, contrast: 0, hl: 0, sh: 0, wh: 0, bk: 0, vib: 0, sat: 0, clarity: vivid ? 35 : 0, dehaze: vivid ? 20 : 0 });
+  if (vivid) S.sharp = Math.max(S.sharp, 40);
+  const satT = (toneStats().sat + (vivid ? 0.42 : T.sat)) / 2;
   for (let i = 0; i < 10; i++) {
     const s = toneStats();
     S.ev = lim(S.ev + 0.8 * Math.log2((T.p50 / Math.max(s.p50, 0.01)) ** 2.2), -4, 4);
@@ -305,6 +308,7 @@ function openExport() {
   if (!(+ew.value) || +ew.value > max) ew.value = max;
   $('native').textContent = t('nativeMax', { n: max });
   $('q-row').hidden = $('fmt').value !== 'jpeg';
+  fill($('q')); // the track only refills on input otherwise: show the current quality from the start
   syncExportSize();
   $('export-dlg').showModal();
 }
@@ -317,7 +321,9 @@ function syncExportSize() {
 // Lossless-JPEG encoding runs on a small worker pool, one 256-row band at a time, while the GPU renders the next
 // band: encoding overlaps rendering, uses several cores, and the full-size image never sits in memory at once.
 function encoderPool() {
-  if (!workersOK) return { size: 1, encode: (band, width, rows, spp) => Promise.resolve().then(() => encodeTileRow(band, width, rows, spp)), close() {} };
+  if (!workersOK) return { size: 1, close() {},
+    encode: (band, width, rows, spp) => Promise.resolve().then(() => encodeTileRow(band, width, rows, spp)),
+    jpeg: (rgba, width, rows, quality) => Promise.resolve().then(() => [encodeJpegStrip(rgba, width, rows, quality)]) };
   const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)), waiting = new Map();
   const workers = Array.from({ length: n }, () => new Worker(new URL('./export-worker.js', import.meta.url), { type: 'module' }));
   workers.forEach(w => (w.onmessage = ({ data }) => {
@@ -325,12 +331,14 @@ function encoderPool() {
     data.error ? p.rej(new Error(data.error)) : p.res(data.chunks);
   }));
   let id = 0;
+  const send = (msg, buf) => new Promise((res, rej) => {
+    waiting.set(id, { res, rej });
+    workers[id % n].postMessage({ id: id++, ...msg }, [buf]);
+  });
   return {
     size: n,
-    encode: (band, width, rows, spp) => new Promise((res, rej) => {
-      waiting.set(id, { res, rej });
-      workers[id % n].postMessage({ id: id++, band, width, rows, spp }, [band.buffer]);
-    }),
+    encode: (band, width, rows, spp) => send({ band, width, rows, spp }, band.buffer),
+    jpeg: (rgba, width, rows, quality) => send({ rgba, width, rows, quality }, rgba.buffer),
     close: () => workers.forEach(w => w.terminate()),
   };
 }
@@ -342,11 +350,11 @@ async function doExport() {
   const max = nativeWidth(), W = Math.min(+$('ew').value, max), H = Math.round(W / exportAspect()), fmt = $('fmt').value;
   if (!(W >= 16 && H >= 16) || H > 65535) return status('badSize', { max });
   const isFloat = fmt !== 'jpeg', bayer = fmt === 'bayer', mode = fmt === 'dng' || bayer ? 2 : 0, spp = bayer ? 1 : 3;
-  const strip = isFloat ? TILE : Math.max(1, Math.min(H, Math.floor(4e6 / W))); // float formats: one tile row per strip
+  // float formats: one tile row per strip; JPEG: whole 8-row block rows, one restart interval (at most 65535 blocks) each
+  const mcus = Math.ceil(W / 8), strip = isFloat ? TILE : 8 * Math.max(1, Math.min(Math.floor(65535 / mcus), Math.floor(4e6 / W / 8), Math.ceil(H / 8)));
   const tg = target(isFloat ? gl.RGBA32F : gl.RGBA8, W, strip);
   const buf = isFloat ? new Float32Array(W * strip * 4) : new Uint8Array(W * strip * 4);
-  const rgba = isFloat ? null : new Uint8ClampedArray(W * H * 4);
-  const pool = fmt === 'dng' || bayer ? encoderPool() : null, bands = [];
+  const pool = fmt !== 'tiff' ? encoderPool() : null, bands = [], quality = +$('q').value;
   const cfa = session.lenses[0].src.cfa || [1, 0, 2, 1], view = viewMatrix(), shift = vShift();
   const k = mode === 2 ? 1 / DNG_HEADROOM : 1, q = v => (v <= 0 ? 0 : v * k >= 1 ? 65535 : Math.round(v * k * 65535));
   busy('exporting', { p: 0 }, 0); await paint();
@@ -357,28 +365,26 @@ async function doExport() {
       gl.bindFramebuffer(gl.FRAMEBUFFER, tg.fb);
       draw({ w: W, h, res: [W, H], off: y0, shift, hq: true, mode, view });
       gl.readPixels(0, 0, W, h, gl.RGBA, isFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, buf);
-      if (!isFloat) rgba.set(buf.subarray(0, W * h * 4), y0 * W * 4);
+      if (!isFloat) bands.push(pool.jpeg(buf.slice(0, W * h * 4), W, h, quality));
       else {
         const band = new Uint16Array(W * h * spp);
         if (bayer) for (let y = 0; y < h; y++) for (let x = 0; x < W; x++) band[y * W + x] = q(buf[(y * W + x) * 4 + cfa[((y0 + y) & 1) * 2 + (x & 1)]]);
         else for (let i = 0, o = 0; o < band.length; i += 4, o += 3) { band[o] = q(buf[i]); band[o + 1] = q(buf[i + 1]); band[o + 2] = q(buf[i + 2]); }
-        if (pool) {
-          bands.push(pool.encode(band, W, h, spp));
-          if (bands.length > 2 * pool.size) await bands[bands.length - 1 - 2 * pool.size]; // back-pressure: cap queued bands
-        } else bands.push(new Uint8Array(band.buffer));
+        bands.push(pool ? pool.encode(band, W, h, spp) : new Uint8Array(band.buffer));
       }
+      if (pool && bands.length > 2 * pool.size) await bands[bands.length - 1 - 2 * pool.size]; // back-pressure: cap queued bands
       busy('exporting', { p: Math.round((y0 + h) / H * 100) }, (y0 + h) / H * (pool ? 0.85 : 1));
       await yieldUI();
     }
-    tg.free();
     const src = session.lenses[0].src;
     const full = S.proj === 'equirect' && S.fov >= 360 && W === 2 * H && S.stretch === 1 && !S.pitch;
     const xmp = { ...sourceXMP(src), ...panoXMP(W, H, full) };
     let blob, ext;
     if (fmt === 'jpeg') {
-      const c = new OffscreenCanvas(W, H);
-      c.getContext('2d').putImageData(new ImageData(rgba, W, H), 0, 0);
-      blob = await jpegWithXMP(await c.convertToBlob({ type: 'image/jpeg', quality: +$('q').value / 100 }), xmp);
+      busy('encoding', {}, 0.95);
+      const segs = (await Promise.all(bands)).flat(); // restart markers RST0..7 between the strips
+      blob = new Blob([...jpegHeader(W, H, quality, mcus * strip / 8, xmp), ...segs.flatMap((s, i) => (i ? [new Uint8Array([0xFF, 0xD0 + ((i - 1) & 7)]), s] : [s])),
+        new Uint8Array([0xFF, 0xD9])], { type: 'image/jpeg' });
       ext = 'jpg';
     } else if (fmt === 'tiff') {
       blob = tiff16(W, H, { strips: bands, rows: strip }, src, xmp);
@@ -386,7 +392,7 @@ async function doExport() {
     } else {
       // edits travel as Lightroom settings, not baked pixels; WB travels as AsShotNeutral
       Object.assign(xmp, { 'crs:HasSettings': 'True', 'crs:Exposure2012': S.ev.toFixed(2), 'crs:Contrast2012': S.contrast,
-        'crs:Highlights2012': S.hl, 'crs:Shadows2012': S.sh, 'crs:Whites2012': S.wh, 'crs:Blacks2012': S.bk, 'crs:Saturation': S.sat, 'crs:Vibrance': S.vib,
+        'crs:Highlights2012': S.hl, 'crs:Shadows2012': S.sh, 'crs:Whites2012': S.wh, 'crs:Blacks2012': S.bk, 'crs:Saturation': S.sat, 'crs:Vibrance': S.vib, 'crs:Texture': S.texture, 'crs:Clarity2012': S.clarity, 'crs:Dehaze': S.dehaze,
         ...Object.fromEntries(HSL_BANDS.flatMap(b => [[`crs:HueAdjustment${b}`, S['hue' + b[0]]], [`crs:SaturationAdjustment${b}`, S['sat' + b[0]]], [`crs:LuminanceAdjustment${b}`, S['lum' + b[0]]]])), 'crs:Sharpness': S.sharp,
         ...(S.defringe ? { 'crs:DefringePurpleAmount': Math.round(S.defringe / 5), 'crs:DefringePurpleHueLo': 30, 'crs:DefringePurpleHueHi': 70 } : {}),
         ...(S.nrc ? { 'crs:ColorNoiseReduction': 0 } : {}) }); // our NR is baked in: keep LR from stacking its default on top
@@ -404,6 +410,7 @@ async function doExport() {
   } catch (e) {
     status('exportFail', { e: e.message });
   } finally {
+    tg.free();
     pool?.close();
     idle();
     render();
@@ -521,7 +528,7 @@ document.addEventListener('change', e => {
       render();
     });
   }
-  if (session.lenses.length && (k === 'nr' || k === 'nrc' || k === 'ca')) { // these change the development
+  if (session.lenses.length && (k === 'nr' || k === 'nrc' || k === 'ca' || k === 'deblur')) { // these change the development
     busy('denoising'); paint().then(() => { const t0 = performance.now(); developAll(); gpu.finish(session.lenses[1].tex); idle(); status('denoised', { ms: Math.round(performance.now() - t0) }); render(); });
   }
 });
@@ -532,6 +539,7 @@ document.addEventListener('dblclick', e => {
 });
 $('asshot').onclick = () => { if (session.lenses.length) { asShot(); syncInputs(); render(); } };
 $('lucky').onclick = () => { if (session.lenses.length) { autoTone(); syncInputs(); render(); } };
+$('vivid').onclick = () => { if (session.lenses.length) { autoTone(true); syncInputs(); render(); } };
 $('pick-level').onclick = () => { $('pick-level').classList.remove('attn'); if (session.lenses.length) { picking = []; S.grid = true; syncInputs(); render(); status('pickHint'); } };
 $('reset-level').onclick = () => { S.lyaw = S.lpitch = S.lroll = 0; syncInputs(); render(); };
 $('autolevel').onclick = async () => { if (session.lenses.length) { await autoLevel(); idle(); status('shot'); syncInputs(); render(); } };
@@ -601,6 +609,7 @@ function showOpen(modal) {
   modal ? dlg.showModal() : dlg.show();
 }
 $('open').onclick = () => showOpen(true);
+$('open-dlg').addEventListener('close', () => setTimeout(() => { if (!session.lenses.length && !$('busy').open) showOpen(false); }));
 showOpen(false);
 $('pick-files').onclick = () => $('files').click();
 $('pick-folder').onclick = () => $('folder').click();

@@ -64,6 +64,7 @@ function compassSearch(evalBatch, x0, steps, rounds) {
 // Match the two lenses' exposure/color in the overlap ring (sensor & lens transmission differ slightly).
 export function matchGains() {
   session.lenses.forEach(L => (L.gain = [1, 1, 1]));
+  if (session.seamGainTex) { gl.deleteTexture(session.seamGainTex); session.seamGainTex = null; } // measure without any residual
   const W = 2048, h = bandH(W), a = new Float32Array(W * h * 4), b = new Float32Array(W * h * 4), sa = [0, 0, 0], sb = [0, 0, 0];
   const tA = tgt('bandA', gl.RGBA32F, W, h);
   drawBand(0, W, tA); gl.readPixels(0, 0, W, h, gl.RGBA, gl.FLOAT, a);

@@ -223,7 +223,43 @@ void main() {
   if (g.a <= .01) { o = vec4(C.rgb, 0.); return; }
   vec3 known = vec3((m & 1) == 0, (m & 2) == 0, (m & 4) == 0), c = C.rgb * u_wb, ch = g.rgb / g.a;
   vec3 est = min(dot(c, known) / max(dot(ch, known), 1e-6) * ch, vec3(8));
-  o = vec4(mix(max(c, est), c, known) / u_wb, 1.);
+  vec3 r = mix(max(c, est), c, known);
+  // one survivor only: its ratio to the guide is the shakiest guess (neighbours flip between survivors and the colors
+  // speckle), so most of it goes to neutral at that brightness
+  if (dot(known, vec3(1)) < 1.5) r = mix(r, vec3(max(r.r, max(r.g, r.b))), .75);
+  o = vec4(r / u_wb, 1.);
+}`;
+
+// Lens deblur, Richardson-Lucy (Richardson 1972, Lucy 1974) on luminance: fisheye lenses get softer toward the image
+// circle, so the blur is a Gaussian whose sigma grows with radius (u_s0 at the centre to u_s1 at u_rmax). One pass is
+// one separable half: u_mode 0 blurs, 1 divides u_num (the observation) by the blur, 2 multiplies u_num (the estimate)
+// by the blurred ratio (clamped, so a few iterations cannot run away).
+export const DEBLUR = `#version 300 es
+precision highp float;
+uniform sampler2D u_src, u_num; uniform ivec2 u_dir; uniform vec2 u_ctr; uniform float u_rmax, u_s0, u_s1; uniform int u_mode;
+out vec4 o;
+void main() {
+  ivec2 P = ivec2(gl_FragCoord.xy), S = textureSize(u_src, 0);
+  float r = length(vec2(P) + .5 - u_ctr) / u_rmax, sg = u_s0 + (u_s1 - u_s0) * min(r * r, 1.);
+  int R = int(ceil(2.5 * sg)); float s = 0., ws = 0.;
+  for (int k = -R; k <= R; k++) {
+    float w = exp(-.5 * float(k * k) / (sg * sg));
+    s += w * texelFetch(u_src, clamp(P + k * u_dir, ivec2(0), S - 1), 0).r; ws += w;
+  }
+  float b = s / ws, n = texelFetch(u_num, P, 0).r;
+  o = vec4(u_mode == 0 ? b : u_mode == 1 ? n / max(b, 1e-4) : n * clamp(b, .7, 1.4));
+}`;
+// luminance in, and the deblurred luminance's ratio applied to the color (clipped pixels and the black outside left alone)
+export const DEBLUR_IO = `#version 300 es
+precision highp float;
+uniform sampler2D u_src, u_y, u_est; uniform vec3 u_wb; uniform bool u_apply;
+out vec4 o;
+void main() {
+  ivec2 P = ivec2(gl_FragCoord.xy); vec4 c = texelFetch(u_src, P, 0);
+  float y = dot(c.rgb * u_wb, vec3(.25, .5, .25));
+  if (!u_apply) { o = vec4(y); return; }
+  float g = y > 1e-3 && c.a == 1. ? clamp(texelFetch(u_est, P, 0).r / max(texelFetch(u_y, P, 0).r, 1e-4), .5, 2.) : 1.;
+  o = vec4(c.rgb * g, c.a);
 }`;
 
 // False-color suppression after demosaicing (median filtering of color, after Freeman 1988; the patent expired):
@@ -289,12 +325,12 @@ uniform sampler2D u_src; uniform ivec2 u_dir; uniform float u_sigma;
 out vec4 o;
 void main() {
   ivec2 P = ivec2(gl_FragCoord.xy), S = textureSize(u_src, 0);
-  int R = int(ceil(3. * u_sigma)); float s = 0., ws = 0.;
+  int R = int(ceil(3. * u_sigma)); vec2 s = vec2(0); float ws = 0.;
   for (int k = -R; k <= R; k++) {
     float w = exp(-.5 * float(k * k) / (u_sigma * u_sigma));
-    s += w * texelFetch(u_src, clamp(P + k * u_dir, ivec2(0), S - 1), 0).r; ws += w;
+    s += w * texelFetch(u_src, clamp(P + k * u_dir, ivec2(0), S - 1), 0).rg; ws += w;
   }
-  o = vec4(s / ws);
+  o = vec4(s / ws, 0, 1);
 }`;
 
 // Output pixel -> projection -> world ray -> each fisheye (per-channel CA warp for LinearRaw input) -> seam blend -> color.
@@ -313,6 +349,7 @@ uniform vec3 u_neutral, u_hsmDims;
 uniform vec2 u_res;
 uniform float u_shift; // vertical pan (rad) for unrolled projections, so the horizon stays straight
 uniform float u_hslH[8], u_hslS[8], u_hslL[8]; // color mixer per band (red ... magenta): hue shift in degrees, saturation and luminance -1..1
+uniform float u_clarity, u_dehaze, u_texture;
 uniform float u_off, u_offX, u_fov, u_stretch, u_pd, u_seam, u_expo, u_contrast, u_sat, u_vib, u_hl, u_sh, u_wh, u_bk, u_sharp, u_defringe;
 uniform int u_proj, u_mode, u_only;
 uniform bool u_flip, u_hq, u_hasHsm, u_grid;
@@ -327,6 +364,15 @@ vec4 cubic(sampler2D t, vec2 uv) {
   return (textureLod(t, vec2(t0.x, t0.y), 0.) * w0.x + textureLod(t, vec2(t12.x, t0.y), 0.) * w12.x + textureLod(t, vec2(t3.x, t0.y), 0.) * w3.x) * w0.y
        + (textureLod(t, vec2(t0.x, t12.y), 0.) * w0.x + textureLod(t, t12, 0.) * w12.x + textureLod(t, vec2(t3.x, t12.y), 0.) * w3.x) * w12.y
        + (textureLod(t, vec2(t0.x, t3.y), 0.) * w0.x + textureLod(t, vec2(t12.x, t3.y), 0.) * w12.x + textureLod(t, t3, 0.) * w3.x) * w3.y;
+}
+
+// Catmull-Rom limited to its 2x2 nearest texels: as sharp, but no overshoot halos or colored ringing beside very
+// bright pixels (blown highlights, rebuilt ones above white)
+vec4 cubicClamped(sampler2D t, vec2 uv) {
+  ivec2 sz = textureSize(t, 0), p = ivec2(floor(uv * vec2(sz) - .5)), m = sz - 1;
+  vec4 a = texelFetch(t, clamp(p, ivec2(0), m), 0), b = texelFetch(t, clamp(p + ivec2(1, 0), ivec2(0), m), 0);
+  vec4 c = texelFetch(t, clamp(p + ivec2(0, 1), ivec2(0), m), 0), d = texelFetch(t, clamp(p + 1, ivec2(0), m), 0);
+  return clamp(cubic(t, uv), min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
 }
 
 vec3 sph(float lon, float lat) { return vec3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon)); }
@@ -370,12 +416,24 @@ vec2 lensPix(Lens L, vec3 w, out float th, out float r) {
 
 // DNG WarpRectilinear per plane: lateral chromatic aberration relative to green
 // gx, gy: screen-space derivatives of the texture coordinate, taken before any branching (see main)
+// log green detail of a lens sample: (fine: vs the next mip level, band: that level vs two coarser)
+vec2 bands(sampler2D t, vec2 uv, float g, float lod) {
+  float a = textureLod(t, uv, lod + 1.).g + 1e-4, b = textureLod(t, uv, lod + 3.).g + 1e-4;
+  return vec2(log((g + 1e-4) / a), log(a / b));
+}
 vec3 sampleLens(sampler2D t, Lens L, vec2 pix, vec2 gx, vec2 gy) {
   vec2 dd = (pix - L.cac) / L.cam; float r2 = dot(dd, dd);
   float sR = L.caR.x + r2 * (L.caR.y + r2 * (L.caR.z + r2 * L.caR.w));
   float sB = L.caB.x + r2 * (L.caB.y + r2 * (L.caB.z + r2 * L.caB.w));
   vec2 is = 1. / L.size, pR = (L.cac + (pix - L.cac) * sR) * is, pG = pix * is, pB = (L.cac + (pix - L.cac) * sB) * is;
-  if (u_hq) return vec3(cubic(t, pR).r, cubic(t, pG).g, cubic(t, pB).b);
+  if (u_hq) { // exports: clamped Catmull-Rom near 1:1 and when enlarging, the (anisotropic) mip chain once an output
+    // pixel spans more than ~2 lens pixels (shrunk exports would alias otherwise); blended in between, no visible switch
+    float k = smoothstep(1.2, 2., max(length(gx), length(gy)) * L.size.x);
+    vec3 m = vec3(textureGrad(t, pR, gx, gy).r, textureGrad(t, pG, gx, gy).g, textureGrad(t, pB, gx, gy).b);
+    if (k >= 1.) return m;
+    vec3 c = pR == pG && pB == pG ? cubicClamped(t, pG).rgb : vec3(cubicClamped(t, pR).r, cubicClamped(t, pG).g, cubicClamped(t, pB).b);
+    return mix(c, m, k);
+  }
   return vec3(textureGrad(t, pR, gx, gy).r, textureGrad(t, pG, gx, gy).g, textureGrad(t, pB, gx, gy).b);
 }
 
@@ -457,14 +515,17 @@ void main() {
   // 5: compact score input (RG16F): green in .r, validity in .g (lens overlap when one lens is forced, else 1)
   if (u_mode == 5) { o = vec4(max(cam.g, 0.), u_only < 0 || (ok0 && ok1) ? 1. : 0., 0, 1); return; }
 
-  // Sharpening (picture output only; DNG carries it as a Lightroom setting): unsharp mask on green in log space, so
-  // colors do not shift, against the next coarser mip level (~1 px blur at full size, the display scale when zoomed
-  // out). The clamp keeps bright/dark edges from ringing.
-  if (u_sharp > 0.) {
-    float d0 = 0., d1 = 0.;
-    if (w0 > 0.) d0 = log((s0.g + 1e-4) / (textureLod(u_tex0, t0, max(log2(max(length(g0x), length(g0y)) * u_lens[0].size.x), 0.) + 1.).g + 1e-4));
-    if (w0 < 1.) d1 = log((s1.g + 1e-4) / (textureLod(u_tex1, t1, max(log2(max(length(g1x), length(g1y)) * u_lens[1].size.x), 0.) + 1.).g + 1e-4));
-    cam *= exp(u_sharp * clamp(mix(d1, d0, w0), -.35, .35));
+  // Sharpening and texture (picture output only; DNG carries them as Lightroom settings), on green in log space so
+  // colors do not shift. Sharpening: against the next coarser mip level (~1 px blur at full size, the display scale
+  // when zoomed out); the clamp keeps bright/dark edges from ringing. Texture: the band between that level and two
+  // levels coarser (~2-8 px: leaves, stone, fabric), with the smallest swings (< 1.5 %, grain and noise) left alone.
+  if (u_sharp > 0. || u_texture != 0.) {
+    vec2 d0 = vec2(0), d1 = vec2(0);
+    if (w0 > 0.) d0 = bands(u_tex0, t0, s0.g, max(log2(max(length(g0x), length(g0y)) * u_lens[0].size.x), 0.));
+    if (w0 < 1.) d1 = bands(u_tex1, t1, s1.g, max(log2(max(length(g1x), length(g1y)) * u_lens[1].size.x), 0.));
+    vec2 d = mix(d1, d0, w0);
+    float tx = sign(d.y) * max(abs(d.y) - .015, 0.);
+    cam *= exp(u_sharp * clamp(d.x, -.35, .35) + u_texture * 1.4 * clamp(tx, -.3, .3));
   }
 
   vec3 c = max(u_M * (cam / u_neutral), 0.); // WB, camera -> linear ProPhoto; above 1 = rebuilt highlights, for Highlights to pull back
@@ -472,15 +533,37 @@ void main() {
   c *= u_expo;
   const vec3 PP_Y = vec3(.2880, .7119, .0001);
   float l = log2(max(dot(c, PP_Y), 1e-6));
-  if (u_mode == 4) { o = vec4(l); return; } // base layer for shadows / highlights
-  if (u_sh != 0. || u_hl != 0.) {
+  // base layer for shadows / highlights / clarity / dehaze: log luminance and the dark channel (darkest of R, G, B)
+  if (u_mode == 4) { o = vec4(l, min(c.r, min(c.g, c.b)), 0, 1); return; }
+  vec2 base = texture(u_base, vec2(fx / u_res.x, row / u_res.y)).rg;
+  if (u_dehaze > 0.) {
+    // Dehaze, dark channel prior (He, Sun & Tang 2009; Microsoft's US 8,340,461 has lapsed): haze lifts the darkest
+    // channel everywhere; with the airlight taken as white, transmission t = 1 - w·dark, and the scene is
+    // (I - A) / t + A. The neighbourhood's dark channel, falling back to the pixel's own across strong edges (halos).
+    float w = .85 * u_dehaze, own = min(c.r, min(c.g, c.b)), e = log2((own + 1e-3) / (base.g + 1e-3));
+    float t = max(1. - w * mix(own, base.g, exp(-.5 * e * e)), .1);
+    c = max((c - 1.) / t + 1., 0.);
+    // that also darkens everything by the haze it removes: give the neighbourhood most of its brightness back, so the
+    // result is more contrast and color, not just a darker picture (as Lightroom's Dehaze behaves)
+    float Yb = exp2(base.r), Yd = max((Yb - 1.) / max(1. - w * base.g, .1) + 1., 1e-4);
+    c *= pow(Yb / Yd, .9);
+    float l0 = l; l = log2(max(dot(c, PP_Y), 1e-6));
+    base.r += l - l0; // the base predates dehaze: shift it along, so the local tools below see detail, not the dehaze
+  }
+  if (u_sh != 0. || u_hl != 0. || u_clarity != 0.) {
     // Local tone: adjust by the *neighbourhood* brightness so detail survives. Where a pixel differs strongly from
     // its blurred surroundings (sky/land edges) fall back to its own value, which avoids halos.
-    float lb = texture(u_base, vec2(fx / u_res.x, row / u_res.y)).r;
-    lb = mix(l, lb, exp(-.5 * (l - lb) * (l - lb)));
+    float lb = mix(l, base.r, exp(-.5 * (l - base.r) * (l - base.r)));
     float ev = lb - log2(.18); // stops relative to mid grey
     c *= exp2(u_sh * 1.8 * (1. - smoothstep(-5., -.5, ev)) + u_hl * 1.5 * smoothstep(-1., 2.5, ev));
+    // Clarity: the pixel's difference from its neighbourhood (in stops) amplified in the mid-tones, so texture and
+    // structure gain punch while skies, deep shadows and the halo guard above stay calm
+    c *= exp2(u_clarity * .8 * (l - lb) * exp(-.5 * ev * ev / 6.25));
   }
+  // above white: desaturate toward the pixel's own luminance until its brightest channel is 1 (white once the luminance
+  // itself is), instead of clipping channel by channel, which turns blown and rebuilt highlights green, yellow or pink
+  float cY = dot(c, PP_Y), cM = max(c.r, max(c.g, c.b));
+  if (cM > 1.) c = cY >= 1. ? vec3(1) : mix(vec3(cY), c, (1. - cY) / (cM - cY));
   c = vec3(tone(c.r), tone(c.g), tone(c.b));
   c = oetf(clamp(u_out * c, 0., 1.));
   // Purple fringe (bright violet-magenta halos around sun glitter, backlit edges): a plain color adjustment on each

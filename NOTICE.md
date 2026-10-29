@@ -21,6 +21,7 @@ Adobe over DNG patents. XMP metadata is covered by Adobe's royalty-free XMP Spec
 | Algorithm | Reference | Patent status |
 |---|---|---|
 | Lossless JPEG (Huffman process) | ITU-T T.81 (1992) | Annex L lists only arithmetic-coding patents; not used here |
+| Baseline JPEG export, 4:4:4: AAN float DCT, Annex K tables, restart intervals per strip | ITU-T T.81 (1992); Arai, Agui & Nakajima 1988 | baseline JPEG patents long expired (e.g. US 4,698,672 in 2006) |
 | Demosaic: RCD (ratio-corrected directional green, color-difference R/B; replaced Hamilton–Adams 2026-10-09, +0.8-3 dB in `tools/demosaic-bench.html`) | L. Sanz Rodríguez, RCD (2017), implemented from its description, no code copied | none known, not formally screened (Hamilton–Adams' US 5,629,734 expired 2015) |
 | Generalized Anscombe transform, closed-form unbiased inverse | Mäkitalo & Foi, IEEE TIP 2011/2013 | none found (the authors' *code* is non-commercial; not used) |
 | À-trous wavelet shrinkage | standard | none found in force |
@@ -36,6 +37,9 @@ Adobe over DNG patents. XMP metadata is covered by Adobe's royalty-free XMP Spec
 | Highlight reconstruction: per-color clip flags from the raw; a clipped color is raised to what the surviving colors and the mean color of the nearest unclipped surroundings (masked mip pyramid) imply; only fully clipped areas shown neutral. DNG export keeps one stop above white (BaselineExposure +1) | dcraw-style clipping/blend; color-propagation ideas as in darktable/RawTherapee, implemented from the idea | not screened (personal-use build) |
 | Noise profile estimate without a NoiseProfile tag: read noise from the dark corners outside the image circle, shot-noise slope from the quietest blocks per brightness (MAD of same-color differences) | noise level function estimation (e.g. Foi et al. 2008), implemented from the idea | none known |
 | Sharpening: unsharp mask on log green against the next mip level | darkroom technique, digital since the 1970s | none in force known |
+| Clarity: a pixel's log-luminance difference from its blurred neighbourhood, amplified in the mid-tones, with an edge fallback against halos | local contrast / large-radius unsharp masking, darkroom era | none in force known |
+| Dehaze: dark channel prior with white airlight on the blurred base layer, edge fallback, most of the neighbourhood brightness given back | He, Sun & Tang, CVPR 2009 | Microsoft US 8,340,461 shown by Google Patents as expired (fees) |
+| Lens deblur: Richardson-Lucy on luminance with a Gaussian PSF whose sigma grows with the fisheye radius (per-camera profile, tuned by eye) | Richardson 1972; Lucy 1974 | not screened: lens-softness correction is patented in places (e.g. DxO); check before a public / patent-safe release |
 | False-color suppression: separable 5-tap median of log R/G, log B/G (white-balanced) | Freeman (Polaroid), US 4,724,395 | expired (filed 1985) |
 
 ### Lateral chromatic aberration (checked 2026-10-08)

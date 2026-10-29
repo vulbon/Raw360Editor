@@ -87,8 +87,6 @@ export function encodeTileRow(band, width, rows, spp) {
 // Whole-image helpers (tests, small images)
 export const tiles = (pixels, width, height, spp) => ({ tiles: Array.from({ length: Math.ceil(height / TILE) }, (_, i) =>
   encodeTileRow(pixels.subarray(i * TILE * width * spp, Math.min(height, (i + 1) * TILE) * width * spp), width, Math.min(TILE, height - i * TILE), spp)).flat() });
-export const strips = (pixels, width, height, spp, rows = 64) => ({ rows, strips: Array.from({ length: Math.ceil(height / rows) }, (_, i) =>
-  new Uint8Array(pixels.buffer, pixels.byteOffset + i * rows * width * spp * 2, Math.min(rows, height - i * rows) * width * spp * 2)) });
 
 // entries: [tag, type, values]; values: number[] | string | Uint8Array. exif: same format, written as a sub-IFD.
 function writeTIFF(width, height, image, entries, exif = [], spp = 3) {
@@ -215,11 +213,131 @@ export function linearDNG(width, height, image, src, neutral, xmpAttrs, cfa = nu
   return writeTIFF(width, height, image, e, exifEntries(src), n);
 }
 
-export async function jpegWithXMP(blob, xmpAttrs) {
-  const jpg = new Uint8Array(await blob.arrayBuffer());
-  const body = new TextEncoder().encode('http://ns.adobe.com/xap/1.0/\0' + xmpPacket(xmpAttrs));
-  const seg = new Uint8Array(4 + body.length);
-  seg.set([0xFF, 0xE1, (body.length + 2) >> 8, (body.length + 2) & 255]);
-  seg.set(body, 4);
-  return new Blob([jpg.subarray(0, 2), seg, jpg.subarray(2)], { type: 'image/jpeg' });
+// ---------- baseline JPEG, 4:4:4 ----------
+// Browsers' encoders halve the color resolution (4:2:0) below quality 100, which smears fine colored edges. This is a
+// plain ITU-T T.81 baseline encoder without subsampling: JFIF YCbCr, the Annex K quantization tables scaled by quality
+// (IJG formula), AAN float DCT, the Annex K Huffman tables. Strips end at restart markers, so workers encode them
+// independently and the caller joins them (jpegHeader + segments with RSTn between + EOI).
+const ZZ = (() => { // zigzag: natural index of each coefficient in scan order
+  const z = [];
+  for (let s = 0; s < 15; s++) for (let i = 0; i <= s; i++) {
+    const [r, c] = s & 1 ? [i, s - i] : [s - i, i];
+    if (r < 8 && c < 8) z.push(r * 8 + c);
+  }
+  return z;
+})();
+const QL = [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56, 14, 17, 22, 29, 51, 87, 80, 62,
+  18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99];
+const QC = [17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99, 99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+  ...new Array(32).fill(99)];
+const AC_L = [1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240,
+  36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84,
+  85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137,
+  138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186,
+  194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234,
+  241, 242, 243, 244, 245, 246, 247, 248, 249, 250];
+const AC_C = [0, 1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19, 34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21,
+  98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39, 40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83,
+  84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135,
+  136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184,
+  185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226, 227, 228, 229, 230, 231, 232, 233,
+  234, 242, 243, 244, 245, 246, 247, 248, 249, 250];
+// [class/id, bits per code length 1..16, values]
+const HUFF = [
+  [0x00, [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
+  [0x10, [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125], AC_L],
+  [0x01, [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
+  [0x11, [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119], AC_C],
+];
+const huffCodes = ([, bits, vals]) => { // canonical codes: value -> [code, length]
+  const t = []; let code = 0, k = 0;
+  bits.forEach((n, i) => { for (let j = 0; j < n; j++) t[vals[k++]] = [code++, i + 1]; code <<= 1; });
+  return t;
+};
+const [DCL, ACL, DCC, ACC] = HUFF.map(huffCodes);
+const quantTables = quality => {
+  const s = quality < 50 ? 5000 / quality : 200 - 2 * quality;
+  return [QL, QC].map(q => q.map(v => Math.min(255, Math.max(1, Math.floor((v * s + 50) / 100)))));
+};
+const AAN = [1, 1.387039845, 1.306562965, 1.175875602, 1, 0.785694958, 0.5411961, 0.275899379];
+
+// Header up to and including SOS: SOI, JFIF, XMP (when given), DQT, SOF0 (1x1 sampling for all three), DHT, DRI.
+export function jpegHeader(width, height, quality, restart, xmpAttrs) {
+  const b = [], seg = (m, body) => b.push(0xFF, m, (body.length + 2) >> 8, (body.length + 2) & 255, ...body);
+  const be = v => [v >> 8, v & 255];
+  b.push(0xFF, 0xD8);
+  seg(0xE0, [74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]);
+  const parts = [new Uint8Array(b)];
+  b.length = 0;
+  if (xmpAttrs) {
+    const x = new TextEncoder().encode('http://ns.adobe.com/xap/1.0/\0' + xmpPacket(xmpAttrs));
+    parts.push(new Uint8Array([0xFF, 0xE1, (x.length + 2) >> 8, (x.length + 2) & 255]), x);
+  }
+  const [ql, qc] = quantTables(quality);
+  seg(0xDB, [0, ...ZZ.map(i => ql[i]), 1, ...ZZ.map(i => qc[i])]);
+  seg(0xC0, [8, ...be(height), ...be(width), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]);
+  seg(0xC4, HUFF.flatMap(([id, bits, vals]) => [id, ...bits, ...vals]));
+  seg(0xDD, be(restart));
+  seg(0xDA, [3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0]);
+  parts.push(new Uint8Array(b));
+  return parts;
+}
+
+// One restart interval: `rows` (8 | rows, except the last strip) x width RGBA pixels -> entropy-coded bytes, padded.
+export function encodeJpegStrip(rgba, width, rows, quality) {
+  const [ql, qc] = quantTables(quality), fl = new Float32Array(64), fc = new Float32Array(64);
+  for (let i = 0; i < 64; i++) { const a = 1 / (AAN[i >> 3] * AAN[i & 7] * 8); fl[i] = a / ql[i]; fc[i] = a / qc[i]; }
+  let out = new Uint8Array(Math.max(4096, width * rows)), n = 0, acc = 0, nb = 0;
+  const put = (code, len) => {
+    acc = (acc << len) | code; nb += len;
+    while (nb >= 8) {
+      const v = (acc >> (nb - 8)) & 255; nb -= 8; acc &= (1 << nb) - 1;
+      if (n + 2 > out.length) { const o = new Uint8Array(out.length * 2); o.set(out); out = o; }
+      out[n++] = v; if (v === 255) out[n++] = 0; // byte stuffing
+    }
+  };
+  const blk = [new Float32Array(64), new Float32Array(64), new Float32Array(64)], q = new Int32Array(64), pred = [0, 0, 0];
+  const dct = d => {
+    for (let p = 0; p < 64; p += 8) dct8(d, p, 1);
+    for (let p = 0; p < 8; p++) dct8(d, p, 8);
+  };
+  const code = (d, comp) => { // comp 0 = Y, 1 = Cb, 2 = Cr: own DC predictor each, chroma tables for 1 and 2
+    dct(d);
+    const c = comp > 0, f = c ? fc : fl, dc = c ? DCC : DCL, ac = c ? ACC : ACL;
+    for (let i = 0; i < 64; i++) q[i] = Math.round(d[ZZ[i]] * f[ZZ[i]]);
+    const bits = v => { let a = Math.abs(v), s = 0; while (a) { s++; a >>= 1; } return s; };
+    const diff = q[0] - pred[comp]; pred[comp] = q[0];
+    let s = bits(diff); put(...dc[s]); if (s) put(diff < 0 ? diff - 1 + (1 << s) : diff, s);
+    let run = 0;
+    for (let i = 1; i < 64; i++) {
+      if (!q[i]) { run++; continue; }
+      while (run > 15) { put(...ac[0xF0]); run -= 16; }
+      s = bits(q[i]); put(...ac[(run << 4) | s]); put(q[i] < 0 ? q[i] - 1 + (1 << s) : q[i], s); run = 0;
+    }
+    if (run) put(...ac[0]);
+  };
+  for (let by = 0; by < rows; by += 8) for (let bx = 0; bx < width; bx += 8) {
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const i = (Math.min(by + y, rows - 1) * width + Math.min(bx + x, width - 1)) * 4, r = rgba[i], g = rgba[i + 1], b = rgba[i + 2], k = y * 8 + x;
+      blk[0][k] = 0.299 * r + 0.587 * g + 0.114 * b - 128;
+      blk[1][k] = -0.168736 * r - 0.331264 * g + 0.5 * b;
+      blk[2][k] = 0.5 * r - 0.418688 * g - 0.081312 * b;
+    }
+    code(blk[0], 0); code(blk[1], 1); code(blk[2], 2);
+  }
+  if (nb) put((1 << (8 - nb)) - 1, 8 - nb); // pad the last byte with 1s
+  return out.slice(0, n);
+}
+// AAN float forward DCT on 8 values at d[p + k*s] (jfdctflt), in place; the 1/8 and AAN factors go into the quantizer
+function dct8(d, p, s) {
+  const d0 = d[p], d1 = d[p + s], d2 = d[p + 2 * s], d3 = d[p + 3 * s], d4 = d[p + 4 * s], d5 = d[p + 5 * s], d6 = d[p + 6 * s], d7 = d[p + 7 * s];
+  const t0 = d0 + d7, t7 = d0 - d7, t1 = d1 + d6, t6 = d1 - d6, t2 = d2 + d5, t5 = d2 - d5, t3 = d3 + d4, t4 = d3 - d4;
+  const t10 = t0 + t3, t13 = t0 - t3, t11 = t1 + t2, t12 = t1 - t2;
+  d[p] = t10 + t11; d[p + 4 * s] = t10 - t11;
+  const z1 = (t12 + t13) * 0.707106781;
+  d[p + 2 * s] = t13 + z1; d[p + 6 * s] = t13 - z1;
+  const u10 = t4 + t5, u11 = t5 + t6, u12 = t6 + t7;
+  const z5 = (u10 - u12) * 0.382683433, z2 = 0.5411961 * u10 + z5, z4 = 1.306562965 * u12 + z5, z3 = u11 * 0.707106781;
+  const z11 = t7 + z3, z13 = t7 - z3;
+  d[p + 5 * s] = z13 + z2; d[p + 3 * s] = z13 - z2; d[p + s] = z11 + z4; d[p + 7 * s] = z11 - z4;
 }
